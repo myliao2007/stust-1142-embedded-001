@@ -1,13 +1,23 @@
 #include <Arduino.h>
 #include "mbedtls/aes.h"
+#include <Adafruit_NeoPixel.h> // 引入標準 NeoPixel 程式庫
+
+// =========================================================
+// 燈號硬體定義 (ESP32-S3-CAM 板載 RGB 燈通常在 GPIO 48)
+// =========================================================
+#define RGB_LED_PIN   48
+#define NUM_PIXELS    1  // 板載通常只有 1 顆燈
+
+// 宣告 NeoPixel 物件 (大部分 WS2812B 在此設定為 NEO_GRB + NEO_KHZ800)
+Adafruit_NeoPixel pixels(NUM_PIXELS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // =========================================================
 // 設定測試參數：模擬 40KB 的檔案傳輸
 // =========================================================
 #define DATA_SIZE 40960  // 40KB (必須是 16 的倍數)
-#define TEST_ROUNDS 100  // 為了平均數據，我們重複傳輸 100 次
+#define TEST_ROUNDS 100  // 重複傳輸 100 次以計算平均
 
-// 準備大緩衝區 (使用 uint8_t 指標，後續分配至 PSRAM)
+// 準備大緩衝區 (分配至 PSRAM)
 uint8_t *large_input_buffer;
 uint8_t *large_output_buffer;
 
@@ -19,7 +29,7 @@ uint8_t iv_sw[16];
 uint8_t iv_hw[16];
 
 // =========================================================
-// 純軟體 AES 實作 (加入 CBC 邏輯)
+// 純軟體 AES 實作 (保持不變)
 // =========================================================
 static const uint8_t sbox[256] = { 
   0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
@@ -78,7 +88,6 @@ void sw_aes128_cbc_encrypt_buffer(const uint8_t *input, uint8_t *output, size_t 
 
     for (size_t i = 0; i < length; i += 16) {
         uint8_t block[16];
-        // 為了避免破壞 input buffer 原始假資料，抽出來在 stack 做 XOR
         for (int j = 0; j < 16; j++) {
             block[j] = input[i + j] ^ temp_iv[j];
         }
@@ -88,20 +97,28 @@ void sw_aes128_cbc_encrypt_buffer(const uint8_t *input, uint8_t *output, size_t 
 }
 
 // =========================================================
-// 測試主程式
+// Setup
 // =========================================================
 void setup() {
     Serial.begin(115200);
     while(!Serial);
     
-    // 檢查 N16R8 的 PSRAM 是否正常初始化
+    // ✨ 初始化 NeoPixel 燈條/燈泡
+    pixels.begin();
+    pixels.clear();
+    pixels.show(); // 初始保持暗燈
+
+    // 檢查 N16R8 的 PSRAM
     if (psramInit()) {
         Serial.printf("PSRAM 初始化成功。剩餘 PSRAM 空間: %d Bytes\n", ESP.getFreePsram());
     } else {
-        Serial.println("PSRAM 初始化失敗！請確認開發板環境設定。");
+        Serial.println("PSRAM 初始化失敗！");
+        // 失敗時亮微弱紅燈以示警告
+        pixels.setPixelColor(0, pixels.Color(50, 0, 0));
+        pixels.show();
+        return;
     }
     
-    // 強制將大型 Buffer 配置於 PSRAM (精準模擬 CAM 處理影像時的大緩衝行為)
     large_input_buffer = (uint8_t*)ps_malloc(DATA_SIZE);
     large_output_buffer = (uint8_t*)ps_malloc(DATA_SIZE);
     
@@ -110,24 +127,31 @@ void setup() {
         return;
     }
     
-    // 填入假資料
     for(int i=0; i<DATA_SIZE; i++) large_input_buffer[i] = (uint8_t)(i & 0xFF);
 
-    Serial.println("\n\n===== ESP32-S3 AES 大量資料傳輸測試 (40KB x 100次) =====");
+    Serial.println("\n\n===== [Group0] ESP32-S3 AES 大量資料傳輸測試 (40KB x 100次) =====");
     Serial.printf("資料總量: %.2f MB\n\n", (float)(DATA_SIZE * TEST_ROUNDS) / 1024.0 / 1024.0);
 
-    // --- 測試 1: 硬體加速 (符合 mbedTLS 3.x 規範) ---
+    // 用於追蹤閃爍狀態的旗標
+    bool led_state = false;
+
+    // --- 測試 1: 硬體加速 ---
     mbedtls_aes_context aes;
     mbedtls_aes_init(&aes);
-    
-    // 注意：在較新的 ESP-IDF 中，加密 Key 寬度的單位是 Bits (128)
     mbedtls_aes_setkey_enc(&aes, key, 128);
     
     unsigned long start_hw = micros();
     
     for(int k=0; k<TEST_ROUNDS; k++) {
-        memcpy(iv_hw, iv_template, 16); // 每次重置 IV
-        // ESP32-S3 底層會自動將此函數路由至 Hardware AES 加速器
+        // ✨ 執行中閃藍燈：每 5 回合切換一次藍燈狀態
+        if (k % 5 == 0) {
+            led_state = !led_state;
+            // 語法：pixels.setPixelColor(索引值, pixels.Color(R, G, B))
+            pixels.setPixelColor(0, pixels.Color(0, 0, led_state ? 40 : 0));
+            pixels.show(); // 更新硬體燈號
+        }
+
+        memcpy(iv_hw, iv_template, 16); 
         mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_ENCRYPT, DATA_SIZE, iv_hw, large_input_buffer, large_output_buffer);
     }
     
@@ -138,7 +162,14 @@ void setup() {
     unsigned long start_sw = micros();
     
     for(int k=0; k<TEST_ROUNDS; k++) {
-        memcpy(iv_sw, iv_template, 16); // 每次重置 IV
+        // ✨ 執行中閃藍燈：維持相同頻率切換
+        if (k % 5 == 0) {
+            led_state = !led_state;
+            pixels.setPixelColor(0, pixels.Color(0, 0, led_state ? 40 : 0));
+            pixels.show();
+        }
+
+        memcpy(iv_sw, iv_template, 16); 
         sw_aes128_cbc_encrypt_buffer(large_input_buffer, large_output_buffer, DATA_SIZE, iv_sw, key);
     }
     
@@ -149,8 +180,8 @@ void setup() {
     float time_sw_sec = (end_sw - start_sw) / 1000000.0;
     
     float total_bytes = (float)DATA_SIZE * TEST_ROUNDS;
-    float speed_hw = (total_bytes / 1024.0) / time_hw_sec; // KB/s
-    float speed_sw = (total_bytes / 1024.0) / time_sw_sec; // KB/s
+    float speed_hw = (total_bytes / 1024.0) / time_hw_sec;
+    float speed_sw = (total_bytes / 1024.0) / time_sw_sec;
 
     // --- 顯示結果 ---
     Serial.println("--- [硬體加速 (HW) Result] ---");
@@ -164,9 +195,16 @@ void setup() {
     Serial.println("\n-----------------------------");
     Serial.printf("ESP32-S3 硬體加速比純軟體快: %.2f 倍\n", speed_hw / speed_sw);
     
-    // 釋放記憶體
     free(large_input_buffer);
     free(large_output_buffer);
+
+    // =========================================================
+    // ✨ 運算結束：轉為穩定恆亮的【綠燈】
+    // =========================================================
+    pixels.setPixelColor(0, pixels.Color(0, 60, 0)); // 亮度設定為 60，清晰且不過刺眼
+    pixels.show();
+    
+    Serial.println("\n>>> [系統提示] 測試完畢，Adafruit NeoPixel 已切換為【定色綠燈】。");
 }
 
 void loop() {}
