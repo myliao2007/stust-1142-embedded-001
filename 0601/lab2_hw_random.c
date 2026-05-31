@@ -4,6 +4,7 @@
 
 #define RGB_LED_PIN   48
 #define NUM_PIXELS    1
+#define GROUP "group0"
 
 Adafruit_NeoPixel pixels(NUM_PIXELS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -85,7 +86,8 @@ void setup() {
   pixels.show();
 
   Serial.println("\n\n=================================================");
-  Serial.println("   ⚡ [Group0] ESP32-S3 賽博朋克：命運與安全亂數主機 ⚡");
+  Serial.println(GROUP);
+  Serial.println("   ⚡ ESP32-S3 賽博朋克：命運與安全亂數主機 ⚡");
   Serial.println("=================================================");
   Serial.println("系統開機成功。本機已成功連線量子級射頻熱雜訊通道。");
 }
@@ -95,6 +97,7 @@ void setup() {
 // =========================================================
 void loop() {
   Serial.println("\n=================================================");
+  Serial.println(GROUP);
   Serial.println(">>> 🎲 倒數計時！開始執行新一輪命運採樣... 🎲");
   
   // ✨ 1. 執行中：顯示藍閃爍效果
